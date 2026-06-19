@@ -11,8 +11,9 @@ INSTALL_DIR="/etc/${APP_NAME}"
 NODES_DIR="${INSTALL_DIR}/nodes"
 BIN_PATH="/usr/local/bin/ssserver"
 PANEL_PATH="/usr/local/bin/ss"
-METHOD="chacha20-ietf-poly1305"
-NODE_NAME="KingNode-SS"
+
+DEFAULT_METHOD="chacha20-ietf-poly1305"
+NODE_NAME_PREFIX="KingNode-SS"
 
 # 如果你的 GitHub 用户名或仓库名不同，改这里
 SCRIPT_URL="https://raw.githubusercontent.com/dd9360/kingnode-ss/main/install.sh"
@@ -40,6 +41,7 @@ install_dependencies() {
 
 get_arch_target() {
     ARCH=$(uname -m)
+
     case "$ARCH" in
         x86_64)
             TARGET="x86_64-unknown-linux-gnu"
@@ -135,8 +137,55 @@ is_port_used() {
     fi
 }
 
+choose_method() {
+    echo
+    echo "请选择节点加密方式："
+    echo "1. chacha20-ietf-poly1305        推荐，兼容最好"
+    echo "2. aes-256-gcm                   兼容好"
+    echo "3. aes-128-gcm                   速度较快"
+    echo "4. 2022-blake3-aes-256-gcm       新协议，部分客户端可能不兼容"
+    echo
+
+    read -rp "请输入选项，默认 1: " method_choice
+
+    case "$method_choice" in
+        2)
+            METHOD="aes-256-gcm"
+            ;;
+        3)
+            METHOD="aes-128-gcm"
+            ;;
+        4)
+            METHOD="2022-blake3-aes-256-gcm"
+            ;;
+        *)
+            METHOD="${DEFAULT_METHOD}"
+            ;;
+    esac
+}
+
+generate_password() {
+    local method="$1"
+
+    case "$method" in
+        2022-blake3-aes-256-gcm)
+            openssl rand -base64 32
+            ;;
+        2022-blake3-aes-128-gcm)
+            openssl rand -base64 16
+            ;;
+        2022-blake3-chacha20-poly1305)
+            openssl rand -base64 32
+            ;;
+        *)
+            openssl rand -base64 16
+            ;;
+    esac
+}
+
 get_server_ip() {
     SERVER_IP=$(curl -4 -fsSL https://api.ipify.org 2>/dev/null || curl -4 -fsSL https://ipv4.icanhazip.com 2>/dev/null || hostname -I | awk '{print $1}')
+
     if [ -z "$SERVER_IP" ]; then
         SERVER_IP="你的服务器IP"
     fi
@@ -145,11 +194,16 @@ get_server_ip() {
 make_ss_link() {
     local port="$1"
     local password="$2"
+    local method="$3"
+
+    if [ -z "$method" ]; then
+        method="${DEFAULT_METHOD}"
+    fi
 
     get_server_ip
 
-    USERINFO=$(echo -n "${METHOD}:${password}" | base64 | tr -d '\n' | tr '+/' '-_' | tr -d '=')
-    echo "ss://${USERINFO}@${SERVER_IP}:${port}#${NODE_NAME}-${port}"
+    USERINFO=$(echo -n "${method}:${password}" | base64 | tr -d '\n' | tr '+/' '-_' | tr -d '=')
+    echo "ss://${USERINFO}@${SERVER_IP}:${port}#${NODE_NAME_PREFIX}-${port}"
 }
 
 create_service() {
@@ -206,7 +260,9 @@ add_node() {
         exit 1
     fi
 
-    PASSWORD=$(openssl rand -base64 16)
+    choose_method
+
+    PASSWORD=$(generate_password "$METHOD")
 
     cat > "${NODES_DIR}/${port}.json" <<EOF
 {
@@ -230,7 +286,7 @@ EOF
         exit 1
     fi
 
-    SS_LINK=$(make_ss_link "$port" "$PASSWORD")
+    SS_LINK=$(make_ss_link "$port" "$PASSWORD" "$METHOD")
 
     echo
     echo -e "${GREEN}SS 节点添加成功！${PLAIN}"
@@ -245,6 +301,11 @@ EOF
     echo "${SS_LINK}"
     echo
     echo -e "${YELLOW}如果连接不上，请检查 VPS 安全组/防火墙是否放行 ${port} 的 TCP 和 UDP。${PLAIN}"
+
+    if [ "$METHOD" = "2022-blake3-aes-256-gcm" ]; then
+        echo -e "${YELLOW}注意：2022-blake3-aes-256-gcm 属于新版 SS 2022，部分客户端/旧版 Passwall/小火箭可能不兼容。${PLAIN}"
+    fi
+
     echo
 }
 
@@ -263,18 +324,24 @@ list_nodes() {
         found=1
         port=$(basename "$file" .json)
         password=$(grep '"password"' "$file" | cut -d '"' -f 4)
+        method=$(grep '"method"' "$file" | cut -d '"' -f 4)
+
+        if [ -z "$method" ]; then
+            method="${DEFAULT_METHOD}"
+        fi
+
         status="未运行"
 
         if systemctl is-active --quiet "${APP_NAME}-${port}"; then
             status="运行中"
         fi
 
-        link=$(make_ss_link "$port" "$password")
+        link=$(make_ss_link "$port" "$password" "$method")
 
         echo "----------------------------------------"
         echo "端口: ${port}"
         echo "状态: ${status}"
-        echo "加密: ${METHOD}"
+        echo "加密: ${method}"
         echo "密码: ${password}"
         echo "节点: ${link}"
     done
@@ -352,6 +419,11 @@ change_port() {
     fi
 
     password=$(grep '"password"' "${NODES_DIR}/${old_port}.json" | cut -d '"' -f 4)
+    method=$(grep '"method"' "${NODES_DIR}/${old_port}.json" | cut -d '"' -f 4)
+
+    if [ -z "$method" ]; then
+        method="${DEFAULT_METHOD}"
+    fi
 
     old_service="${APP_NAME}-${old_port}"
     new_service="${APP_NAME}-${new_port}"
@@ -366,7 +438,7 @@ change_port() {
     "server": "0.0.0.0",
     "server_port": ${new_port},
     "password": "${password}",
-    "method": "${METHOD}",
+    "method": "${method}",
     "timeout": 300,
     "mode": "tcp_and_udp",
     "fast_open": false
@@ -383,13 +455,72 @@ EOF
         exit 1
     fi
 
-    link=$(make_ss_link "$new_port" "$password")
+    link=$(make_ss_link "$new_port" "$password" "$method")
 
     echo
     echo -e "${GREEN}端口修改成功！${PLAIN}"
     echo
     echo "旧端口: ${old_port}"
     echo "新端口: ${new_port}"
+    echo "加密: ${method}"
+    echo
+    echo -e "${GREEN}新的节点链接：${PLAIN}"
+    echo
+    echo "$link"
+    echo
+}
+
+change_method() {
+    need_root
+    init_dirs
+    list_nodes
+
+    read -rp "请输入要修改加密方式的节点端口: " port
+
+    if ! valid_port "$port"; then
+        echo -e "${RED}端口不合法${PLAIN}"
+        exit 1
+    fi
+
+    if [ ! -f "${NODES_DIR}/${port}.json" ]; then
+        echo -e "${RED}端口 ${port} 的节点不存在${PLAIN}"
+        exit 1
+    fi
+
+    choose_method
+
+    PASSWORD=$(generate_password "$METHOD")
+
+    cat > "${NODES_DIR}/${port}.json" <<EOF
+{
+    "server": "0.0.0.0",
+    "server_port": ${port},
+    "password": "${PASSWORD}",
+    "method": "${METHOD}",
+    "timeout": 300,
+    "mode": "tcp_and_udp",
+    "fast_open": false
+}
+EOF
+
+    systemctl restart "${APP_NAME}-${port}"
+
+    sleep 1
+
+    if ! systemctl is-active --quiet "${APP_NAME}-${port}"; then
+        echo -e "${RED}节点重启失败，请查看日志：${PLAIN}"
+        echo "journalctl -u ${APP_NAME}-${port} -f"
+        exit 1
+    fi
+
+    link=$(make_ss_link "$port" "$PASSWORD" "$METHOD")
+
+    echo
+    echo -e "${GREEN}加密方式修改成功！${PLAIN}"
+    echo
+    echo "端口: ${port}"
+    echo "加密: ${METHOD}"
+    echo "新密码: ${PASSWORD}"
     echo
     echo -e "${GREEN}新的节点链接：${PLAIN}"
     echo
@@ -448,12 +579,19 @@ uninstall_all() {
 
 show_status() {
     init_dirs
-    echo
+
+    found=0
+
     for file in "${NODES_DIR}"/*.json; do
         [ -e "$file" ] || continue
+        found=1
         port=$(basename "$file" .json)
         systemctl status "${APP_NAME}-${port}" --no-pager
     done
+
+    if [ "$found" -eq 0 ]; then
+        echo -e "${YELLOW}暂无节点${PLAIN}"
+    fi
 }
 
 show_menu() {
@@ -464,11 +602,12 @@ show_menu() {
     echo "1. 添加 SS 节点"
     echo "2. 删除 SS 节点"
     echo "3. 修改节点端口"
-    echo "4. 查看所有节点"
-    echo "5. 重启所有节点"
-    echo "6. 查看服务状态"
-    echo "7. 安装/修复 ss 快捷命令"
-    echo "8. 卸载全部节点"
+    echo "4. 修改节点加密方式"
+    echo "5. 查看所有节点"
+    echo "6. 重启所有节点"
+    echo "7. 查看服务状态"
+    echo "8. 安装/修复 ss 快捷命令"
+    echo "9. 卸载全部节点"
     echo "0. 退出"
     echo "========================================"
     echo
@@ -486,19 +625,22 @@ show_menu() {
             change_port
             ;;
         4)
-            list_nodes
+            change_method
             ;;
         5)
-            restart_all
+            list_nodes
             ;;
         6)
-            show_status
+            restart_all
             ;;
         7)
+            show_status
+            ;;
+        8)
             need_root
             install_panel_command
             ;;
-        8)
+        9)
             uninstall_all
             ;;
         0)
