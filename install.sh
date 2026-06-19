@@ -10,7 +10,7 @@ SS_CMD="/usr/local/bin/ss"
 mkdir -p "$NODES"
 
 # =========================
-# 依赖
+# 依赖安装
 # =========================
 install_deps() {
     if command -v apt >/dev/null 2>&1; then
@@ -68,14 +68,14 @@ ip_check() {
 check_port() {
     p=$1
     if ss -tuln | grep -q ":$p "; then
-        echo "⚠ 端口被占用"
+        echo "⚠ 端口占用"
         return 1
     fi
     echo "✔ 端口可用"
 }
 
 # =========================
-# 生成 ss 链接（小火箭100%兼容）
+# 小火箭链接（100%标准）
 # =========================
 make_link() {
     port=$1
@@ -85,15 +85,15 @@ make_link() {
     userinfo=$(echo -n "aes-128-gcm:${pass}" | base64 -w0)
 
     echo ""
-    echo "=========================="
+    echo "============================"
     echo "✔ 小火箭节点"
     echo "ss://${userinfo}@${ip}:${port}#KingNode-SS-${port}"
-    echo "=========================="
+    echo "============================"
     echo ""
 }
 
 # =========================
-# systemd（核心修复点）
+# systemd（核心修复）
 # =========================
 create_service() {
     port=$1
@@ -120,7 +120,7 @@ EOF
     sleep 1
 
     if systemctl is-active --quiet kingnode-ss-$port; then
-        echo "✔ 服务启动成功 $port"
+        echo "✔ 服务 $port 启动成功"
     else
         echo "❌ 服务启动失败"
         journalctl -u kingnode-ss-$port -n 10 --no-pager
@@ -128,7 +128,7 @@ EOF
 }
 
 # =========================
-# 自动创建节点（安装后必须有）
+# 自动节点
 # =========================
 auto_node() {
     port=$((RANDOM%20000+20000))
@@ -173,7 +173,7 @@ EOF
 }
 
 # =========================
-# 删除节点
+# 删除节点（本脚本）
 # =========================
 del_node() {
     read -p "端口: " port
@@ -218,7 +218,39 @@ status() {
 }
 
 # =========================
-# pause（防卡死核心）
+# 卸载（本脚本所有服务）
+# =========================
+uninstall_all() {
+
+echo ""
+echo "⚠ 正在卸载 KingNode SS（本脚本）..."
+echo ""
+
+services=$(systemctl list-units --type=service | grep kingnode-ss | awk '{print $1}')
+
+for s in $services; do
+    systemctl stop "$s" 2>/dev/null || true
+    systemctl disable "$s" 2>/dev/null || true
+done
+
+rm -f /etc/systemd/system/kingnode-ss-*.service
+systemctl daemon-reload
+systemctl reset-failed
+
+rm -rf /etc/kingnode-ss
+rm -f /usr/local/bin/ss
+rm -f /usr/local/bin/ssserver
+
+pkill ssserver 2>/dev/null || true
+
+hash -r
+
+echo "✔ 卸载完成"
+exit 0
+}
+
+# =========================
+# pause（解决卡死）
 # =========================
 pause() {
     echo ""
@@ -226,7 +258,7 @@ pause() {
 }
 
 # =========================
-# ss 命令（稳定版）
+# ss命令
 # =========================
 install_ss_cmd() {
     cat > "$SS_CMD" <<'EOF'
@@ -255,26 +287,28 @@ echo "1. 添加"
 echo "2. 删除"
 echo "3. 列表"
 echo "4. 状态"
+echo "5. 卸载全部"
 echo "0. 退出"
 
 read -p "选择: " c
 
 case $c in
     1) bash /usr/local/bin/install.sh ;;
-    2) echo "用主安装脚本删除" ;;
+    2) echo "用主脚本删除" ;;
     3) ls $BASE ;;
     4) systemctl list-units | grep kingnode ;;
+    5) echo "请在系统菜单执行卸载" ;;
     0) exit ;;
 esac
 
 done
 EOF
 
-    chmod +x "$SS_CMD"
+chmod +x "$SS_CMD"
 }
 
 # =========================
-# 主菜单（完全修复卡死）
+# 主菜单（最终稳定）
 # =========================
 menu() {
 while true; do
@@ -286,8 +320,10 @@ status
 echo "===== KingNode SS ====="
 echo "1. 添加节点"
 echo "2. 删除节点"
-echo "3. 节点列表"
+echo "3. 列表"
 echo "4. 状态"
+echo "5. 自动节点"
+echo "6. 卸载全部（本脚本）"
 echo "0. 退出"
 
 read -p "选择: " c
@@ -297,6 +333,8 @@ case $c in
     2) del_node; pause ;;
     3) list_node; pause ;;
     4) status; pause ;;
+    5) auto_node; pause ;;
+    6) uninstall_all ;;
     0) exit ;;
     *) echo "无效"; sleep 1 ;;
 esac
