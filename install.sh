@@ -1,16 +1,31 @@
 #!/usr/bin/env bash
 set -e
 
+REPO="dd9360/kingnode-ss"
 APP="kingnode-ss"
+
 BASE="/etc/$APP"
 NODES="$BASE/nodes"
 BIN="/usr/local/bin/ssserver"
 SS_CMD="/usr/local/bin/ss"
+VERSION_FILE="$BASE/version"
 
 mkdir -p "$NODES"
 
 # =========================
-# 依赖安装
+# 当前版本
+# =========================
+CURRENT_VERSION="v3.0-stable"
+
+# =========================
+# GitHub 最新版本检测
+# =========================
+get_latest_version() {
+    curl -s "https://api.github.com/repos/$REPO/releases/latest" | grep tag_name | cut -d '"' -f4
+}
+
+# =========================
+# 安装依赖
 # =========================
 install_deps() {
     if command -v apt >/dev/null 2>&1; then
@@ -48,6 +63,18 @@ install_ssserver() {
 }
 
 # =========================
+# 版本记录
+# =========================
+save_version() {
+    echo "$CURRENT_VERSION" > "$VERSION_FILE"
+}
+
+show_version() {
+    echo "当前版本: $(cat $VERSION_FILE 2>/dev/null || echo '未安装')"
+    echo "最新版本: $(get_latest_version)"
+}
+
+# =========================
 # IP检测
 # =========================
 ip_check() {
@@ -67,15 +94,11 @@ ip_check() {
 # =========================
 check_port() {
     p=$1
-    if ss -tuln | grep -q ":$p "; then
-        echo "⚠ 端口占用"
-        return 1
-    fi
-    echo "✔ 端口可用"
+    ss -tuln | grep -q ":$p " && return 1 || return 0
 }
 
 # =========================
-# 小火箭链接（100%标准）
+# 小火箭链接（标准）
 # =========================
 make_link() {
     port=$1
@@ -85,15 +108,12 @@ make_link() {
     userinfo=$(echo -n "aes-128-gcm:${pass}" | base64 -w0)
 
     echo ""
-    echo "============================"
-    echo "✔ 小火箭节点"
-    echo "ss://${userinfo}@${ip}:${port}#KingNode-SS-${port}"
-    echo "============================"
+    echo "ss://${userinfo}@${ip}:${port}#KingNode-${port}"
     echo ""
 }
 
 # =========================
-# systemd（核心修复）
+# systemd 修复
 # =========================
 create_service() {
     port=$1
@@ -116,15 +136,6 @@ EOF
     systemctl daemon-reload
     systemctl enable kingnode-ss-$port
     systemctl restart kingnode-ss-$port
-
-    sleep 1
-
-    if systemctl is-active --quiet kingnode-ss-$port; then
-        echo "✔ 服务 $port 启动成功"
-    else
-        echo "❌ 服务启动失败"
-        journalctl -u kingnode-ss-$port -n 10 --no-pager
-    fi
 }
 
 # =========================
@@ -154,7 +165,10 @@ EOF
 add_node() {
     read -p "端口: " port
 
-    check_port "$port" || return
+    if ! check_port "$port"; then
+        echo "端口占用"
+        return
+    fi
 
     pass=$(openssl rand -base64 16)
 
@@ -173,7 +187,7 @@ EOF
 }
 
 # =========================
-# 删除节点（本脚本）
+# 删除节点
 # =========================
 del_node() {
     read -p "端口: " port
@@ -185,7 +199,6 @@ del_node() {
     rm -f "$NODES/$port.json"
 
     systemctl daemon-reload
-
     echo "✔ 已删除"
 }
 
@@ -193,72 +206,66 @@ del_node() {
 # 列表
 # =========================
 list_node() {
-    echo "节点列表："
-    for f in $NODES/*.json; do
-        [ -e "$f" ] || continue
-        echo "✔ $(basename $f .json)"
-    done
+    ls "$NODES"
 }
 
 # =========================
 # 状态
 # =========================
 status() {
-    echo "状态："
     for f in $NODES/*.json; do
         [ -e "$f" ] || continue
         port=$(basename $f .json)
 
-        if systemctl is-active --quiet kingnode-ss-$port; then
-            echo "✔ $port 运行中"
-        else
-            echo "❌ $port 未运行"
-        fi
+        systemctl is-active kingnode-ss-$port >/dev/null 2>&1 \
+        && echo "✔ $port" \
+        || echo "✘ $port"
     done
 }
 
 # =========================
-# 卸载（本脚本所有服务）
+# 卸载（版本管理）
 # =========================
 uninstall_all() {
 
-echo ""
-echo "⚠ 正在卸载 KingNode SS（本脚本）..."
-echo ""
+echo "⚠ 卸载 KingNode SS..."
 
-services=$(systemctl list-units --type=service | grep kingnode-ss | awk '{print $1}')
-
-for s in $services; do
-    systemctl stop "$s" 2>/dev/null || true
-    systemctl disable "$s" 2>/dev/null || true
-done
+systemctl list-units | grep kingnode | awk '{print $1}' | xargs -r systemctl stop
+systemctl list-units | grep kingnode | awk '{print $1}' | xargs -r systemctl disable
 
 rm -f /etc/systemd/system/kingnode-ss-*.service
-systemctl daemon-reload
-systemctl reset-failed
-
 rm -rf /etc/kingnode-ss
 rm -f /usr/local/bin/ss
 rm -f /usr/local/bin/ssserver
 
 pkill ssserver 2>/dev/null || true
 
-hash -r
-
-echo "✔ 卸载完成"
+echo "✔ 已卸载"
 exit 0
 }
 
 # =========================
-# pause（解决卡死）
+# 更新系统（版本管理核心）
 # =========================
-pause() {
-    echo ""
-    read -p "回车继续..."
+update_self() {
+    echo "正在更新..."
+
+    curl -fsSL "https://raw.githubusercontent.com/$REPO/main/install.sh" -o /tmp/kingnode.sh
+    bash /tmp/kingnode.sh
+
+    echo "✔ 更新完成"
+    exit 0
 }
 
 # =========================
-# ss命令
+# pause
+# =========================
+pause() {
+    read -p "回车返回..."
+}
+
+# =========================
+# ss CLI
 # =========================
 install_ss_cmd() {
     cat > "$SS_CMD" <<'EOF'
@@ -268,18 +275,14 @@ BASE="/etc/kingnode-ss/nodes"
 
 while true; do
 clear
-
 echo "===== KingNode SS ====="
 
 for f in $BASE/*.json; do
     [ -e "$f" ] || continue
-    port=$(basename "$f" .json)
-
-    if systemctl is-active --quiet kingnode-ss-$port; then
-        echo "✔ $port 运行中"
-    else
-        echo "❌ $port 未运行"
-    fi
+    port=$(basename $f .json)
+    systemctl is-active kingnode-ss-$port >/dev/null 2>&1 \
+    && echo "✔ $port" \
+    || echo "✘ $port"
 done
 
 echo ""
@@ -287,17 +290,16 @@ echo "1. 添加"
 echo "2. 删除"
 echo "3. 列表"
 echo "4. 状态"
-echo "5. 卸载全部"
+echo "5. 更新"
+echo "6. 卸载"
 echo "0. 退出"
 
 read -p "选择: " c
 
 case $c in
     1) bash /usr/local/bin/install.sh ;;
-    2) echo "用主脚本删除" ;;
-    3) ls $BASE ;;
-    4) systemctl list-units | grep kingnode ;;
-    5) echo "请在系统菜单执行卸载" ;;
+    5) bash /usr/local/bin/install.sh update_self ;;
+    6) bash /usr/local/bin/install.sh uninstall_all ;;
     0) exit ;;
 esac
 
@@ -308,7 +310,7 @@ chmod +x "$SS_CMD"
 }
 
 # =========================
-# 主菜单（最终稳定）
+# 主菜单
 # =========================
 menu() {
 while true; do
@@ -322,8 +324,8 @@ echo "1. 添加节点"
 echo "2. 删除节点"
 echo "3. 列表"
 echo "4. 状态"
-echo "5. 自动节点"
-echo "6. 卸载全部（本脚本）"
+echo "5. 更新系统"
+echo "6. 卸载系统"
 echo "0. 退出"
 
 read -p "选择: " c
@@ -333,10 +335,9 @@ case $c in
     2) del_node; pause ;;
     3) list_node; pause ;;
     4) status; pause ;;
-    5) auto_node; pause ;;
+    5) update_self ;;
     6) uninstall_all ;;
     0) exit ;;
-    *) echo "无效"; sleep 1 ;;
 esac
 
 done
@@ -350,10 +351,11 @@ main() {
     install_ssserver
     install_ss_cmd
 
+    save_version
     auto_node
 
     echo "✔ 安装完成"
-    echo "👉 输入 ss 使用"
+    echo "版本: $CURRENT_VERSION"
 }
 
 main
