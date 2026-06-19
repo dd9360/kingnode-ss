@@ -40,7 +40,6 @@ After=network.target
 [Service]
 ExecStart=$BIN -c $BASE/nodes/%i.json
 Restart=always
-RestartSec=3
 
 [Install]
 WantedBy=multi-user.target
@@ -48,66 +47,65 @@ EOF
 
 systemctl daemon-reload
 
-cat > "$CLI" <<'EOF'
-#!/usr/bin/env bash
+# =========================
+# CLI（关键：不用EOF嵌套）
+# =========================
 
-BASE="/etc/knss"
-NODES="$BASE/nodes"
-mkdir -p "$NODES"
+printf '%s\n' '#!/usr/bin/env bash' > "$CLI"
+printf '%s\n' 'BASE="/etc/knss"' >> "$CLI"
+printf '%s\n' 'NODES="$BASE/nodes"' >> "$CLI"
+printf '%s\n' 'mkdir -p "$NODES"' >> "$CLI"
 
-pause(){ read -p "回车返回..." }
+printf '%s\n' 'pause(){ read -p "回车返回..." }' >> "$CLI"
+printf '%s\n' 'get_ip(){ curl -s api.ipify.org }' >> "$CLI"
+printf '%s\n' 'gen_pass(){ openssl rand -base64 12 }' >> "$CLI"
 
-get_ip(){ curl -s https://api.ipify.org }
-
-gen_pass(){ openssl rand -base64 12 }
+cat >> "$CLI" <<'EOF'
 
 make_link(){
-    ip=$(get_ip)
-    port=$1
-    pass=$2
-    method=$3
-    userinfo=$(echo -n "${method}:${pass}" | base64 -w0)
-
-    echo "ss://${userinfo}@${ip}:${port}#KNSS-${port}"
+ip=$(get_ip)
+port=$1
+pass=$2
+method=$3
+userinfo=$(echo -n "${method}:${pass}" | base64 -w0)
+echo "ss://${userinfo}@${ip}:${port}#KNSS-${port}"
 }
 
 add_node(){
-    read -p "端口: " port
+read -p "端口: " port
 
-    if ss -tuln | grep -q ":$port "; then
-        echo "端口占用"
-        pause
-        return
-    fi
+if ss -tuln | grep -q ":$port "; then
+echo "端口占用"
+exit
+fi
 
-    echo "1 aes-128-gcm"
-    echo "2 aes-256-gcm"
-    echo "3 chacha20-poly1305"
-    read -p "选择: " c
+echo "1 aes-128-gcm"
+echo "2 aes-256-gcm"
+echo "3 chacha20-poly1305"
+read -p "选择: " c
 
-    case $c in
-        1) method="aes-128-gcm" ;;
-        2) method="aes-256-gcm" ;;
-        3) method="chacha20-poly1305" ;;
-        *) method="aes-128-gcm" ;;
-    esac
+case $c in
+1) method="aes-128-gcm" ;;
+2) method="aes-256-gcm" ;;
+3) method="chacha20-poly1305" ;;
+*) method="aes-128-gcm" ;;
+esac
 
-    pass=$(gen_pass)
+pass=$(gen_pass)
 
-    printf '{\n' > "$NODES/$port.json"
-    printf '  "server":"0.0.0.0",\n' >> "$NODES/$port.json"
-    printf '  "server_port":%s,\n' "$port" >> "$NODES/$port.json"
-    printf '  "password":"%s",\n' "$pass" >> "$NODES/$port.json"
-    printf '  "method":"%s",\n' "$method" >> "$NODES/$port.json"
-    printf '  "mode":"tcp_and_udp"\n' >> "$NODES/$port.json"
-    printf '}\n' >> "$NODES/$port.json"
+printf '{\n' > "$NODES/$port.json"
+printf '  "server":"0.0.0.0",\n' >> "$NODES/$port.json"
+printf '  "server_port":%s,\n' "$port" >> "$NODES/$port.json"
+printf '  "password":"%s",\n' "$pass" >> "$NODES/$port.json"
+printf '  "method":"%s",\n' "$method" >> "$NODES/$port.json"
+printf '  "mode":"tcp_and_udp"\n' >> "$NODES/$port.json"
+printf '}\n' >> "$NODES/$port.json"
 
-    systemctl enable knss@$port >/dev/null 2>&1
-    systemctl restart knss@$port >/dev/null 2>&1
+systemctl enable knss@$port >/dev/null 2>&1
+systemctl restart knss@$port >/dev/null 2>&1
 
-    make_link "$port" "$pass" "$method"
-
-    pause
+make_link "$port" "$pass" "$method"
+pause
 }
 
 menu(){
@@ -121,12 +119,11 @@ echo "4 状态"
 echo "0 退出"
 
 read -p "选择: " c
-
 case $c in
 1) add_node ;;
-2) echo "del" ;;
+2) echo del ;;
 3) ls $NODES; pause ;;
-4) echo "status"; pause ;;
+4) echo status; pause ;;
 0) exit ;;
 esac
 done
@@ -138,4 +135,3 @@ EOF
 chmod +x "$CLI"
 
 echo "✔ 安装完成"
-echo "👉 knss"
