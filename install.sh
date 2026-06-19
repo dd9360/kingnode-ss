@@ -4,25 +4,24 @@ set -e
 APP="knss"
 BASE="/etc/knss"
 NODES="$BASE/nodes"
-SUB="$BASE/sub.json"
 BIN="/usr/local/bin/ssserver"
+CLI="/usr/local/bin/knss"
 
 mkdir -p "$NODES"
 
-echo "=== KNSS v2 安装中 ==="
+echo "=== KNSS 修复终版安装中 ==="
 
 # =========================
 # 依赖
 # =========================
-if command -v apt >/dev/null 2>&1; then
-    apt update -y
-    apt install -y curl wget tar xz-utils openssl iproute2 ca-certificates
-fi
+apt update -y >/dev/null 2>&1 || true
+apt install -y curl wget tar xz-utils openssl iproute2 ca-certificates >/dev/null 2>&1 || true
 
 # =========================
 # 安装 ssserver
 # =========================
 ARCH=$(uname -m)
+
 case "$ARCH" in
     x86_64) T="x86_64-unknown-linux-gnu" ;;
     aarch64) T="aarch64-unknown-linux-gnu" ;;
@@ -41,7 +40,7 @@ cp ssserver "$BIN"
 chmod +x "$BIN"
 
 # =========================
-# systemd模板
+# systemd（标准模板）
 # =========================
 cat > /etc/systemd/system/knss@.service <<EOF
 [Unit]
@@ -52,6 +51,7 @@ After=network.target
 ExecStart=$BIN -c $BASE/nodes/%i.json
 Restart=always
 RestartSec=3
+LimitNOFILE=1048576
 
 [Install]
 WantedBy=multi-user.target
@@ -60,80 +60,66 @@ EOF
 systemctl daemon-reload
 
 # =========================
-# CLI（knss）
+# 写 CLI（核心修复）
 # =========================
-cat > /usr/local/bin/knss <<'EOF'
+cat > "$CLI" <<'EOF'
 #!/usr/bin/env bash
 
 BASE="/etc/knss"
 NODES="$BASE/nodes"
-SUB="$BASE/sub.json"
-
 mkdir -p "$NODES"
 
-ip=$(curl -s https://api.ipify.org)
+pause(){ read -p "回车返回..." }
 
-pause(){ read -p "回车继续..." }
+get_ip(){ curl -s https://api.ipify.org }
 
 gen_pass(){ openssl rand -base64 12 }
 
 make_link(){
-    ip=$(curl -s https://api.ipify.org)
+    ip=$(get_ip)
     port=$1
     pass=$2
     method=$3
+
     userinfo=$(echo -n "${method}:${pass}" | base64 -w0)
+
+    echo ""
+    echo "========================"
+    echo "✔ KNSS 节点"
     echo "ss://${userinfo}@${ip}:${port}#KNSS-${port}"
-}
-
-sync_sub(){
-
-    echo "[" > $SUB
-
-    first=1
-    for f in $NODES/*.json; do
-        [ -e "$f" ] || continue
-
-        port=$(basename $f .json)
-        pass=$(grep password $f | cut -d '"' -f4)
-        method=$(grep method $f | cut -d '"' -f4)
-
-        if [ $first -eq 0 ]; then
-            echo "," >> $SUB
-        fi
-        first=0
-
-        ip=$(curl -s https://api.ipify.org)
-        link=$(echo -n "${method}:${pass}@${ip}:${port}" | base64 -w0)
-
-        echo "{\"name\":\"KNSS-$port\",\"type\":\"ss\",\"server\":\"$ip\",\"port\":$port,\"cipher\":\"$method\",\"password\":\"$pass\"}" >> $SUB
-    done
-
-    echo "]" >> $SUB
+    echo "========================"
+    echo ""
 }
 
 add_node(){
+    clear
+    echo "=== 添加节点 ==="
 
-clear
-echo "=== 添加节点 ==="
-read -p "端口: " port
+    read -p "端口: " port
 
-echo "选择加密："
-echo "1 aes-128-gcm"
-echo "2 aes-256-gcm"
-echo "3 chacha20-poly1305"
-read -p "选择: " c
+    if ss -tuln | grep -q ":$port "; then
+        echo "❌ 端口占用"
+        pause
+        return
+    fi
 
-case $c in
-    1) method="aes-128-gcm" ;;
-    2) method="aes-256-gcm" ;;
-    3) method="chacha20-poly1305" ;;
-    *) method="aes-128-gcm" ;;
-esac
+    echo ""
+    echo "选择加密方式:"
+    echo "1 aes-128-gcm"
+    echo "2 aes-256-gcm"
+    echo "3 chacha20-poly1305"
+    read -p "选择: " c
 
-pass=$(gen_pass)
+    case $c in
+        1) method="aes-128-gcm" ;;
+        2) method="aes-256-gcm" ;;
+        3) method="chacha20-poly1305" ;;
+        *) method="aes-128-gcm" ;;
+    esac
 
-cat > $NODES/$port.json <<EOF2
+    pass=$(gen_pass)
+
+    cat > "$NODES/$port.json" <<EOF2
 {
   "server":"0.0.0.0",
   "server_port":$port,
@@ -143,75 +129,98 @@ cat > $NODES/$port.json <<EOF2
 }
 EOF2
 
-systemctl enable knss@$port >/dev/null 2>&1
-systemctl restart knss@$port >/dev/null 2>&1
+    systemctl enable knss@$port >/dev/null 2>&1
+    systemctl restart knss@$port >/dev/null 2>&1
 
-echo "✔ 创建成功"
-make_link $port $pass $method
+    echo "✔ 创建成功"
+    echo "端口: $port"
+    echo "加密: $method"
 
-sync_sub
-pause
+    make_link "$port" "$pass" "$method"
+
+    pause
 }
 
 del_node(){
-clear
-echo "=== 节点列表 ==="
-ls $NODES
-echo ""
-read -p "端口: " port
+    clear
+    echo "=== 当前节点 ==="
 
-systemctl stop knss@$port 2>/dev/null
-systemctl disable knss@$port 2>/dev/null
-rm -f $NODES/$port.json
+    for f in $NODES/*.json; do
+        [ -e "$f" ] || continue
+        echo "✔ $(basename $f .json)"
+    done
 
-sync_sub
-echo "✔ 已删除"
-pause
+    echo ""
+    read -p "删除端口: " port
+
+    systemctl stop knss@$port >/dev/null 2>&1
+    systemctl disable knss@$port >/dev/null 2>&1
+
+    rm -f "$NODES/$port.json"
+
+    echo "✔ 已删除"
+    pause
 }
 
 list_node(){
-ls $NODES
-pause
+    clear
+    ls $NODES 2>/dev/null || echo "无节点"
+    pause
 }
 
 status(){
-for f in $NODES/*.json; do
-    [ -e "$f" ] || continue
-    port=$(basename $f .json)
-    systemctl is-active knss@$port >/dev/null 2>&1 && echo "✔ $port" || echo "✘ $port"
-done
-pause
+    clear
+    for f in $NODES/*.json; do
+        [ -e "$f" ] || continue
+        port=$(basename $f .json)
+
+        systemctl is-active knss@$port >/dev/null 2>&1 \
+        && echo "✔ $port" \
+        || echo "✘ $port"
+    done
+    pause
 }
 
 uninstall(){
-echo "⚠ 卸载 KNSS v2..."
-rm -rf /etc/knss
-rm -f /usr/local/bin/knss
-rm -f /etc/systemd/system/knss@.service
-systemctl daemon-reload
-echo "✔ 完成"
-exit 0
+    echo "⚠ 卸载 KNSS..."
+
+    systemctl list-units | grep knss | awk '{print $1}' | xargs -r systemctl stop
+    systemctl list-units | grep knss | awk '{print $1}' | xargs -r systemctl disable
+
+    rm -rf /etc/knss
+    rm -f /usr/local/bin/knss
+    rm -f /usr/local/bin/ssserver
+    rm -f /etc/systemd/system/knss@.service
+
+    systemctl daemon-reload
+
+    echo "✔ 卸载完成"
+    exit 0
 }
 
 menu(){
 while true; do
 clear
-echo "===== KNSS v2 ====="
-echo "1 添加"
-echo "2 删除"
+
+echo "===== KNSS 修复终版 ====="
+echo "1 添加节点"
+echo "2 删除节点"
 echo "3 列表"
 echo "4 状态"
 echo "5 卸载"
 echo "0 退出"
+echo ""
+
 read -p "选择: " c
 
 case $c in
-1) add_node ;;
-2) del_node ;;
-3) list_node ;;
-4) status ;;
-5) uninstall ;;
-0) exit ;;
+    1) add_node ;;
+    2) del_node ;;
+    3) list_node ;;
+    4) status ;;
+    5) uninstall ;;
+    0) exit ;;
+    *) echo "无效"; sleep 1 ;;
 esac
 done
 }
@@ -219,8 +228,9 @@ done
 menu
 EOF
 
-chmod +x /usr/local/bin/knss
+chmod +x "$CLI"
 
 echo ""
-echo "✔ KNSS v2 安装完成"
-echo "👉 输入 knss 使用"
+echo "✔ KNSS 修复终版安装完成"
+echo "👉 使用: knss"
+echo ""
