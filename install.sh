@@ -15,19 +15,19 @@ PLAIN='\033[0m'
 mkdir -p "$NODES"
 
 # =========================
-# 安装依赖
+# 依赖安装
 # =========================
 install_deps() {
     if command -v apt >/dev/null 2>&1; then
         apt update -y
-        apt install -y curl wget tar xz-utils openssl iproute2
+        apt install -y curl wget tar xz-utils openssl iproute2 ca-certificates
     elif command -v yum >/dev/null 2>&1; then
-        yum install -y curl wget tar xz openssl iproute
+        yum install -y curl wget tar xz openssl iproute ca-certificates
     fi
 }
 
 # =========================
-# 安装 shadowsocks-rust
+# shadowsocks-rust 安装
 # =========================
 install_ssserver() {
     if [ -f "$BIN" ]; then
@@ -35,7 +35,6 @@ install_ssserver() {
     fi
 
     ARCH=$(uname -m)
-
     case "$ARCH" in
         x86_64) TARGET="x86_64-unknown-linux-gnu" ;;
         aarch64) TARGET="aarch64-unknown-linux-gnu" ;;
@@ -56,17 +55,45 @@ install_ssserver() {
 }
 
 # =========================
+# IP归属检测（解决 AF 问题）
+# =========================
+ip_geo_check() {
+    IP=$(curl -s https://api.ipify.org)
+
+    GEO=$(curl -s "https://ipinfo.io/$IP/country" || echo "UN")
+
+    echo ""
+    echo -e "${YELLOW}====== IP 归属检测 ======${PLAIN}"
+    echo "IP: $IP"
+    echo "国家代码: $GEO"
+
+    if [ "$GEO" = "AF" ]; then
+        echo -e "${RED}⚠ 注意：IP 被识别为 AF（Afghanistan），可能为数据库误判${PLAIN}"
+        echo "建议更换 IP 或使用干净机房 IP"
+    elif [ "$GEO" = "HK" ]; then
+        echo -e "${GREEN}✔ IP 识别为 HK（Hong Kong）${PLAIN}"
+    elif [ "$GEO" = "US" ]; then
+        echo -e "${GREEN}✔ IP 识别为 US${PLAIN}"
+    else
+        echo -e "${YELLOW}⚠ 当前 IP 归属：$GEO${PLAIN}"
+    fi
+
+    echo ""
+}
+
+# =========================
 # 端口检测
 # =========================
 check_port() {
     port=$1
+
     if ss -tuln | grep -q ":$port "; then
-        echo -e "${YELLOW}⚠ 端口 $port 已被占用${PLAIN}"
+        echo -e "${RED}⚠ 端口 $port 已被占用${PLAIN}"
         return 1
-    else
-        echo -e "${GREEN}✔ 端口 $port 可用${PLAIN}"
-        return 0
     fi
+
+    echo -e "${GREEN}✔ 端口 $port 可用${PLAIN}"
+    return 0
 }
 
 # =========================
@@ -83,18 +110,17 @@ add_node() {
 
     cat > "$NODES/$port.json" <<EOF
 {
-    "server": "0.0.0.0",
-    "server_port": $port,
-    "password": "$password",
-    "method": "chacha20-ietf-poly1305",
-    "mode": "tcp_and_udp"
+  "server": "0.0.0.0",
+  "server_port": $port,
+  "password": "$password",
+  "method": "chacha20-ietf-poly1305",
+  "mode": "tcp_and_udp"
 }
 EOF
 
-    systemctl enable kingnode-ss-$port >/dev/null 2>&1 || true
-    systemctl restart kingnode-ss-$port 2>/dev/null || true
-
     create_service "$port"
+
+    echo -e "${GREEN}✔ 节点 $port 创建完成${PLAIN}"
 }
 
 # =========================
@@ -119,43 +145,35 @@ EOF
     systemctl daemon-reload
     systemctl enable kingnode-ss-$port
     systemctl restart kingnode-ss-$port
-
-    echo -e "${GREEN}✔ 节点 $port 已启动${PLAIN}"
 }
 
 # =========================
 # 删除节点
 # =========================
 del_node() {
-    read -p "输入端口: " port
+    read -p "端口: " port
+
     systemctl stop kingnode-ss-$port 2>/dev/null || true
     systemctl disable kingnode-ss-$port 2>/dev/null || true
+
     rm -f /etc/systemd/system/kingnode-ss-$port.service
     rm -f "$NODES/$port.json"
+
     systemctl daemon-reload
-    echo "已删除 $port"
+
+    echo "✔ 已删除 $port"
 }
 
 # =========================
-# 节点列表
+# 状态检测
 # =========================
-list_node() {
-    echo "节点列表："
-    for f in $NODES/*.json; do
-        [ -e "$f" ] || continue
-        echo "✔ $(basename $f .json)"
-    done
+status() {
     echo ""
-}
+    echo "====== 节点状态 ======"
 
-# =========================
-# 服务状态检测
-# =========================
-status_check() {
-    echo "服务状态："
     for f in $NODES/*.json; do
         [ -e "$f" ] || continue
-        port=$(basename $f .json)
+        port=$(basename "$f" .json)
 
         if systemctl is-active --quiet kingnode-ss-$port; then
             echo "✔ $port 运行中"
@@ -163,83 +181,66 @@ status_check() {
             echo "✘ $port 未运行"
         fi
     done
+
     echo ""
 }
 
 # =========================
-# 主菜单（ss）
+# ss 命令（本地稳定版）
+# =========================
+install_ss_cmd() {
+    cat > "$SS_CMD" <<'EOF'
+#!/usr/bin/env bash
+
+BASE="/etc/kingnode-ss/nodes"
+
+echo "====== KingNode SS ======"
+
+for f in $BASE/*.json; do
+    [ -e "$f" ] || continue
+    port=$(basename "$f" .json)
+
+    if systemctl is-active --quiet kingnode-ss-$port; then
+        echo "✔ $port 运行中"
+    else
+        echo "✘ $port 未运行"
+    fi
+done
+
+echo ""
+EOF
+
+    chmod +x "$SS_CMD"
+}
+
+# =========================
+# 主菜单
 # =========================
 menu() {
     clear
-    status_check
 
-    echo "====== KingNode SS ======"
+    ip_geo_check
+    status
+
+    echo "===== KingNode SS ====="
     echo "1. 添加节点"
     echo "2. 删除节点"
-    echo "3. 查看节点"
+    echo "3. 查看状态"
     echo "4. 重启全部"
     echo "0. 退出"
-    echo "========================="
+    echo "======================="
 
     read -p "选择: " c
 
     case $c in
         1) add_node ;;
         2) del_node ;;
-        3) list_node ;;
-        4) systemctl restart kingnode-ss-* ;;
+        3) status ;;
+        4) systemctl restart kingnode-ss-* 2>/dev/null ;;
         0) exit ;;
     esac
 
     menu
-}
-
-# =========================
-# ss 命令（关键修复）
-# =========================
-install_ss_cmd() {
-    cat > "$SS_CMD" <<EOF
-#!/usr/bin/env bash
-bash /usr/local/bin/kingnode-panel.sh
-EOF
-    chmod +x "$SS_CMD"
-}
-
-# =========================
-# 面板本体（完全本地）
-# =========================
-install_panel() {
-    cat > /usr/local/bin/kingnode-panel.sh <<'EOF'
-#!/usr/bin/env bash
-BASE="/etc/kingnode-ss/nodes"
-
-menu() {
-    clear
-    echo "KingNode SS Local Panel"
-    echo "======================="
-    echo "1. Add Node"
-    echo "2. Delete Node"
-    echo "3. List"
-    echo "4. Status"
-    echo "0. Exit"
-    echo "======================="
-    read -p "Select: " c
-
-    case $c in
-        1) echo "use system install script" ;;
-        2) echo "use system install script" ;;
-        3) ls $BASE ;;
-        4) systemctl list-units | grep kingnode ;;
-        0) exit ;;
-    esac
-
-    menu
-}
-
-menu
-EOF
-
-    chmod +x /usr/local/bin/kingnode-panel.sh
 }
 
 # =========================
@@ -248,10 +249,9 @@ EOF
 main() {
     install_deps
     install_ssserver
-    install_panel
     install_ss_cmd
 
-    echo -e "${GREEN}安装完成！直接输入 ss 使用面板${PLAIN}"
+    echo -e "${GREEN}✔ 安装完成，输入 ss 使用${PLAIN}"
 }
 
 main
