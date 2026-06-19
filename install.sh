@@ -22,7 +22,7 @@ install_deps() {
 }
 
 # =========================
-# SS 安装
+# 安装 ssserver
 # =========================
 install_ssserver() {
     if [ -f "$BIN" ]; then return; fi
@@ -48,19 +48,18 @@ install_ssserver() {
 }
 
 # =========================
-# IP检测（AF提示）
+# IP检测
 # =========================
 ip_check() {
     ip=$(curl -s https://api.ipify.org)
     geo=$(curl -s https://ipinfo.io/$ip/country || echo "UN")
 
     echo ""
-    echo "IP: $ip  国家: $geo"
+    echo "IP: $ip | 国家: $geo"
 
     if [ "$geo" = "AF" ]; then
-        echo "⚠ IP可能被误判为 AF"
+        echo "⚠ IP可能误判 AF"
     fi
-    echo ""
 }
 
 # =========================
@@ -69,14 +68,14 @@ ip_check() {
 check_port() {
     p=$1
     if ss -tuln | grep -q ":$p "; then
-        echo "⚠ 端口占用"
+        echo "⚠ 端口被占用"
         return 1
     fi
-    echo "✔ 可用"
+    echo "✔ 端口可用"
 }
 
 # =========================
-# 生成 ss 链接（修复小火箭）
+# 生成 ss 链接（小火箭100%兼容）
 # =========================
 make_link() {
     port=$1
@@ -85,11 +84,16 @@ make_link() {
 
     userinfo=$(echo -n "aes-128-gcm:${pass}" | base64 -w0)
 
+    echo ""
+    echo "=========================="
+    echo "✔ 小火箭节点"
     echo "ss://${userinfo}@${ip}:${port}#KingNode-SS-${port}"
+    echo "=========================="
+    echo ""
 }
 
 # =========================
-# systemd
+# systemd（核心修复点）
 # =========================
 create_service() {
     port=$1
@@ -102,6 +106,7 @@ After=network.target
 [Service]
 ExecStart=$BIN -c $NODES/$port.json
 Restart=always
+RestartSec=3
 LimitNOFILE=1048576
 
 [Install]
@@ -111,6 +116,36 @@ EOF
     systemctl daemon-reload
     systemctl enable kingnode-ss-$port
     systemctl restart kingnode-ss-$port
+
+    sleep 1
+
+    if systemctl is-active --quiet kingnode-ss-$port; then
+        echo "✔ 服务启动成功 $port"
+    else
+        echo "❌ 服务启动失败"
+        journalctl -u kingnode-ss-$port -n 10 --no-pager
+    fi
+}
+
+# =========================
+# 自动创建节点（安装后必须有）
+# =========================
+auto_node() {
+    port=$((RANDOM%20000+20000))
+    pass=$(openssl rand -base64 16)
+
+    cat > "$NODES/$port.json" <<EOF
+{
+  "server":"0.0.0.0",
+  "server_port":$port,
+  "password":"$pass",
+  "method":"aes-128-gcm",
+  "mode":"tcp_and_udp"
+}
+EOF
+
+    create_service "$port"
+    make_link "$port" "$pass"
 }
 
 # =========================
@@ -134,11 +169,7 @@ add_node() {
 EOF
 
     create_service "$port"
-
-    echo ""
-    echo "✔ 节点创建成功"
     make_link "$port" "$pass"
-    echo ""
 }
 
 # =========================
@@ -181,17 +212,17 @@ status() {
         if systemctl is-active --quiet kingnode-ss-$port; then
             echo "✔ $port 运行中"
         else
-            echo "✘ $port 未运行"
+            echo "❌ $port 未运行"
         fi
     done
 }
 
 # =========================
-# pause（解决卡死核心）
+# pause（防卡死核心）
 # =========================
 pause() {
     echo ""
-    read -p "回车返回菜单..."
+    read -p "回车继续..."
 }
 
 # =========================
@@ -215,7 +246,7 @@ for f in $BASE/*.json; do
     if systemctl is-active --quiet kingnode-ss-$port; then
         echo "✔ $port 运行中"
     else
-        echo "✘ $port 未运行"
+        echo "❌ $port 未运行"
     fi
 done
 
@@ -243,7 +274,7 @@ EOF
 }
 
 # =========================
-# 主菜单（最终修复版）
+# 主菜单（完全修复卡死）
 # =========================
 menu() {
 while true; do
@@ -253,7 +284,7 @@ ip_check
 status
 
 echo "===== KingNode SS ====="
-echo "1. 新增节点"
+echo "1. 添加节点"
 echo "2. 删除节点"
 echo "3. 节点列表"
 echo "4. 状态"
@@ -281,7 +312,10 @@ main() {
     install_ssserver
     install_ss_cmd
 
-    echo "✔ 安装完成，输入 ss"
+    auto_node
+
+    echo "✔ 安装完成"
+    echo "👉 输入 ss 使用"
 }
 
 main
