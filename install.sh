@@ -7,15 +7,10 @@ NODES="$BASE/nodes"
 BIN="/usr/local/bin/ssserver"
 SS_CMD="/usr/local/bin/ss"
 
-GREEN='\033[0;32m'
-RED='\033[0;31m'
-YELLOW='\033[0;33m'
-PLAIN='\033[0m'
-
 mkdir -p "$NODES"
 
 # =========================
-# 依赖安装
+# 基础依赖
 # =========================
 install_deps() {
     if command -v apt >/dev/null 2>&1; then
@@ -27,7 +22,7 @@ install_deps() {
 }
 
 # =========================
-# shadowsocks-rust 安装
+# SS服务安装
 # =========================
 install_ssserver() {
     if [ -f "$BIN" ]; then
@@ -41,10 +36,10 @@ install_ssserver() {
         *) echo "不支持架构 $ARCH" && exit 1 ;;
     esac
 
-    VERSION=$(curl -s https://api.github.com/repos/shadowsocks/shadowsocks-rust/releases/latest | grep tag_name | cut -d '"' -f4)
+    VER=$(curl -s https://api.github.com/repos/shadowsocks/shadowsocks-rust/releases/latest | grep tag_name | cut -d '"' -f4)
 
-    FILE="shadowsocks-${VERSION}.${TARGET}.tar.xz"
-    URL="https://github.com/shadowsocks/shadowsocks-rust/releases/download/${VERSION}/${FILE}"
+    FILE="shadowsocks-${VER}.${TARGET}.tar.xz"
+    URL="https://github.com/shadowsocks/shadowsocks-rust/releases/download/${VER}/${FILE}"
 
     cd /tmp
     wget -q "$URL"
@@ -55,29 +50,24 @@ install_ssserver() {
 }
 
 # =========================
-# IP归属检测（解决 AF 问题）
+# IP检测（解决 AF问题）
 # =========================
-ip_geo_check() {
-    IP=$(curl -s https://api.ipify.org)
-
-    GEO=$(curl -s "https://ipinfo.io/$IP/country" || echo "UN")
+ip_check() {
+    ip=$(curl -s https://api.ipify.org)
+    geo=$(curl -s https://ipinfo.io/$ip/country || echo "UN")
 
     echo ""
-    echo -e "${YELLOW}====== IP 归属检测 ======${PLAIN}"
-    echo "IP: $IP"
-    echo "国家代码: $GEO"
+    echo "========== IP检测 =========="
+    echo "IP: $ip"
+    echo "国家: $geo"
 
-    if [ "$GEO" = "AF" ]; then
-        echo -e "${RED}⚠ 注意：IP 被识别为 AF（Afghanistan），可能为数据库误判${PLAIN}"
-        echo "建议更换 IP 或使用干净机房 IP"
-    elif [ "$GEO" = "HK" ]; then
-        echo -e "${GREEN}✔ IP 识别为 HK（Hong Kong）${PLAIN}"
-    elif [ "$GEO" = "US" ]; then
-        echo -e "${GREEN}✔ IP 识别为 US${PLAIN}"
-    else
-        echo -e "${YELLOW}⚠ 当前 IP 归属：$GEO${PLAIN}"
+    if [ "$geo" = "AF" ]; then
+        echo "⚠ 可能误判为 AF（建议更换IP）"
+    elif [ "$geo" = "HK" ]; then
+        echo "✔ 香港IP"
     fi
 
+    echo "============================"
     echo ""
 }
 
@@ -85,46 +75,44 @@ ip_geo_check() {
 # 端口检测
 # =========================
 check_port() {
-    port=$1
-
-    if ss -tuln | grep -q ":$port "; then
-        echo -e "${RED}⚠ 端口 $port 已被占用${PLAIN}"
+    p=$1
+    if ss -tuln | grep -q ":$p "; then
+        echo "⚠ 端口 $p 已占用"
         return 1
     fi
-
-    echo -e "${GREEN}✔ 端口 $port 可用${PLAIN}"
+    echo "✔ 端口 $p 可用"
     return 0
 }
 
 # =========================
-# 添加节点
+# 自动创建节点
 # =========================
-add_node() {
-    read -p "请输入端口: " port
-
-    if ! check_port "$port"; then
-        return
-    fi
-
-    password=$(openssl rand -base64 16)
+auto_node() {
+    port=$((RANDOM%20000+20000))
+    pass=$(openssl rand -base64 16)
 
     cat > "$NODES/$port.json" <<EOF
 {
-  "server": "0.0.0.0",
-  "server_port": $port,
-  "password": "$password",
-  "method": "chacha20-ietf-poly1305",
-  "mode": "tcp_and_udp"
+  "server":"0.0.0.0",
+  "server_port":$port,
+  "password":"$pass",
+  "method":"aes-128-gcm",
+  "mode":"tcp_and_udp"
 }
 EOF
 
-    create_service "$port"
+    systemctl restart kingnode-ss-$port 2>/dev/null || true
 
-    echo -e "${GREEN}✔ 节点 $port 创建完成${PLAIN}"
+    echo ""
+    echo "✔ 默认节点已创建"
+    echo "端口: $port"
+    echo "密码: $pass"
+    echo "加密: aes-128-gcm"
+    echo ""
 }
 
 # =========================
-# systemd 服务
+# systemd
 # =========================
 create_service() {
     port=$1
@@ -148,32 +136,78 @@ EOF
 }
 
 # =========================
+# 添加节点
+# =========================
+add_node() {
+    read -p "端口: " port
+
+    if ! check_port "$port"; then
+        return
+    fi
+
+    pass=$(openssl rand -base64 16)
+
+    cat > "$NODES/$port.json" <<EOF
+{
+  "server":"0.0.0.0",
+  "server_port":$port,
+  "password":"$pass",
+  "method":"aes-128-gcm",
+  "mode":"tcp_and_udp"
+}
+EOF
+
+    create_service "$port"
+
+    echo "✔ 节点创建成功"
+}
+
+# =========================
 # 删除节点
 # =========================
 del_node() {
     read -p "端口: " port
-
     systemctl stop kingnode-ss-$port 2>/dev/null || true
     systemctl disable kingnode-ss-$port 2>/dev/null || true
-
     rm -f /etc/systemd/system/kingnode-ss-$port.service
     rm -f "$NODES/$port.json"
-
     systemctl daemon-reload
-
-    echo "✔ 已删除 $port"
+    echo "✔ 已删除"
 }
 
 # =========================
-# 状态检测
+# 修改端口
 # =========================
-status() {
-    echo ""
-    echo "====== 节点状态 ======"
+change_port() {
+    read -p "旧端口: " old
+    read -p "新端口: " new
 
+    mv "$NODES/$old.json" "$NODES/$new.json"
+    sed -i "s/$old/$new/g" "$NODES/$new.json"
+
+    systemctl restart kingnode-ss-$new
+    echo "✔ 修改成功"
+}
+
+# =========================
+# 列表
+# =========================
+list_node() {
+    echo "=== 节点列表 ==="
     for f in $NODES/*.json; do
         [ -e "$f" ] || continue
-        port=$(basename "$f" .json)
+        echo "✔ $(basename $f .json)"
+    done
+}
+
+# =========================
+# 状态
+# =========================
+status() {
+    echo "=== 状态 ==="
+    for f in $NODES/*.json; do
+        [ -e "$f" ] || continue
+        port=$(basename $f .json)
 
         if systemctl is-active --quiet kingnode-ss-$port; then
             echo "✔ $port 运行中"
@@ -181,12 +215,18 @@ status() {
             echo "✘ $port 未运行"
         fi
     done
-
-    echo ""
 }
 
 # =========================
-# ss 命令（本地稳定版）
+# pause（解决卡死关键）
+# =========================
+pause() {
+    echo ""
+    read -p "回车返回菜单..."
+}
+
+# =========================
+# ss命令（稳定版）
 # =========================
 install_ss_cmd() {
     cat > "$SS_CMD" <<'EOF'
@@ -194,7 +234,11 @@ install_ss_cmd() {
 
 BASE="/etc/kingnode-ss/nodes"
 
-echo "====== KingNode SS ======"
+while true; do
+clear
+
+echo "===== KingNode SS ====="
+echo ""
 
 for f in $BASE/*.json; do
     [ -e "$f" ] || continue
@@ -208,6 +252,23 @@ for f in $BASE/*.json; do
 done
 
 echo ""
+echo "1. 添加"
+echo "2. 删除"
+echo "3. 列表"
+echo "4. 修改端口"
+echo "0. 退出"
+
+read -p "选择: " c
+
+case $c in
+    1) bash /usr/local/bin/install.sh ;;
+    2) echo "用安装脚本删除" ;;
+    3) ls $BASE ;;
+    4) echo "用修改功能" ;;
+    0) exit ;;
+esac
+
+done
 EOF
 
     chmod +x "$SS_CMD"
@@ -217,30 +278,32 @@ EOF
 # 主菜单
 # =========================
 menu() {
-    clear
+while true; do
+clear
 
-    ip_geo_check
-    status
+ip_check
+status
 
-    echo "===== KingNode SS ====="
-    echo "1. 添加节点"
-    echo "2. 删除节点"
-    echo "3. 查看状态"
-    echo "4. 重启全部"
-    echo "0. 退出"
-    echo "======================="
+echo "===== KingNode SS ====="
+echo "1. 添加节点"
+echo "2. 删除节点"
+echo "3. 列表"
+echo "4. 修改端口"
+echo "5. 自动节点"
+echo "0. 退出"
 
-    read -p "选择: " c
+read -p "选择: " c
 
-    case $c in
-        1) add_node ;;
-        2) del_node ;;
-        3) status ;;
-        4) systemctl restart kingnode-ss-* 2>/dev/null ;;
-        0) exit ;;
-    esac
+case $c in
+    1) add_node; pause ;;
+    2) del_node; pause ;;
+    3) list_node; pause ;;
+    4) change_port; pause ;;
+    5) auto_node; pause ;;
+    0) exit ;;
+esac
 
-    menu
+done
 }
 
 # =========================
@@ -251,7 +314,9 @@ main() {
     install_ssserver
     install_ss_cmd
 
-    echo -e "${GREEN}✔ 安装完成，输入 ss 使用${PLAIN}"
+    auto_node
+
+    echo "✔ 安装完成"
 }
 
 main
